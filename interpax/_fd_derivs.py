@@ -103,9 +103,14 @@ def _cubic1(x, f, axis):
 
 def _validate_bc(bc_type, expected_deriv_shape, dtype):
     if isinstance(bc_type, str):
-        errorif(bc_type == "periodic", NotImplementedError)
-        bc_type = (bc_type, bc_type)
+        #errorif(bc_type == "periodic", NotImplementedError)
+        if bc_type != "periodic": 
+            bc_type = (bc_type, bc_type)
 
+    # special case for periodic
+    if bc_type == "periodic": 
+        return "periodic", dtype
+    
     else:
         errorif(
             len(bc_type) != 2,
@@ -113,18 +118,18 @@ def _validate_bc(bc_type, expected_deriv_shape, dtype):
             "`bc_type` must contain 2 elements to specify start and end conditions.",
         )
 
-        errorif(
-            "periodic" in bc_type,
-            ValueError,
-            "'periodic' `bc_type` is defined for both "
-            + "curve ends and cannot be used with other "
-            + "boundary conditions.",
-        )
+#        errorif(
+#            "periodic" in bc_type,
+#            ValueError,
+#            "'periodic' `bc_type` is defined for both "
+#            + "curve ends and cannot be used with other "
+#            + "boundary conditions.",
+#        )
 
     validated_bc = []
     for bc in bc_type:
         if isinstance(bc, str):
-            errorif(bc_type == "periodic", NotImplementedError)
+            #errorif(bc_type == "periodic", NotImplementedError)
             if bc == "clamped":
                 validated_bc.append((1, jnp.zeros(expected_deriv_shape)))
             elif bc == "natural":
@@ -203,6 +208,65 @@ def _cubic2(x, f, axis, bc, dtype):
         fx = jnp.moveaxis(fx, 0, axis)
 
     else:
+
+        if bc == "periodic": 
+            print("local")
+            n_p = n - 1
+            h = dx
+            h_wrapped = jnp.concatenate([h[-1:], h[:-1]])
+            diag = 2 * (h_wrapped + h)
+
+            upper_t = h[:n_p - 1]
+            lower_t = h[1:n_p]
+
+            # RHS b calculation
+            s = df
+            s_prev = jnp.roll(s, 1, axis=0)
+            h_prev = jnp.roll(dxr, 1, axis=0)
+            b = 3 * (dxr * s_prev + h_prev * s)
+            b_p = b[:n_p]
+
+            # Define the "corners" that the tridiagonal operator doesn't see
+            corner_top_right = h[-1]
+            corner_bottom_left = h[-1]  # In periodic, these are often identical
+
+            # 1. Setup the Tridiagonal Operator
+            # We adjust the first and last diag elements for Sherman-Morrison stability
+            gamma = -h[0]
+            diag_sm = diag.at[0].set(diag[0] - gamma)
+            diag_sm = diag_sm.at[-1].set(diag[-1] - corner_top_right * corner_bottom_left / gamma)
+            
+            T_op = lx.TridiagonalLinearOperator(diag_sm, lower_t, upper_t)
+
+            # 2. Setup the correction vectors u and v
+            # u is the column update, v is the row update
+            u_vec = jnp.zeros((n_p,) + f.shape[1:], dtype=dtype)
+            u_vec = u_vec.at[0].set(gamma)
+            u_vec = u_vec.at[-1].set(corner_bottom_left)
+
+            v_vec = jnp.zeros(n_p, dtype=dtype)
+            v_vec = v_vec.at[0].set(1.0)
+            v_vec = v_vec.at[-1].set(corner_top_right / gamma)
+
+            # 3. Solve the system (T x = b and T q = u)
+            # Use vectorize to handle potential multidimensional f (e.g., Bx, By, Bz)
+            solve_t = lambda vec: lx.linear_solve(T_op, vec, lx.Tridiagonal()).value
+            
+            y_vec = jnp.vectorize(solve_t, signature="(n)->(n)")(b_p.T).T
+            q_vec = jnp.vectorize(solve_t, signature="(n)->(n)")(u_vec.T).T
+
+            # 4. Sherman-Morrison Formula: x = y - [(v @ y) / (1 + v @ q)] * q
+            v_dot_y = jnp.tensordot(v_vec, y_vec, axes=1)
+            v_dot_q = jnp.tensordot(v_vec, q_vec, axes=1)
+            
+            # Add a small epsilon to denominator for safety, though usually not needed
+            fx_reduced = y_vec - (v_dot_y / (1.0 + v_dot_q)) * q_vec
+
+            # Append d_0 to the end to satisfy d_{n-1} = d_0
+            fx = jnp.concatenate([fx_reduced, fx_reduced[:1]], axis=0)
+            fx = jnp.moveaxis(fx, 0, axis)
+            return fx.astype(f.dtype)
+
         # Find derivative values at each x[i] by solving a tridiagonal
         # system.
         diag = jnp.zeros(n, dtype=x.dtype)

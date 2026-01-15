@@ -63,7 +63,7 @@ from interpax import (
 jax_config.update("jax_enable_x64", True)
 
 
-class TestAkima1DInterpolator:
+class TestAkima1DInterpolator():
     def test_eval(self):
         x = np.arange(0.0, 11.0)
         y = np.array([0.0, 2.0, 1.0, 3.0, 2.0, 6.0, 5.5, 5.5, 2.7, 5.1, 3.0])
@@ -816,6 +816,11 @@ class TestCubicSpline:
             (1, first_deriv),
             (2, second_deriv),
         ]
+
+        if np.allclose(np.take(y, 0, axis), np.take(y, -1, axis)):
+            S = CubicSpline(x, y, axis=axis, bc_type="periodic")
+            self.check_correctness(S, "periodic", "periodic")
+
         for bc in bc_all[:3]:
             S = CubicSpline(x, y, axis=axis, bc_type=bc)
             self.check_correctness(S, bc, bc)
@@ -837,6 +842,17 @@ class TestCubicSpline:
             Y[1, :, 0] = y[:n] + 2
             Y[1, :, 1] = y[:n] + 3
             self.check_all_bc(x[:n], Y, 1)
+
+    def test_periodic_data(self): 
+        x = np.linspace(0, 2 * np.pi, 10)
+        y = np.sin(x)
+        
+        # Check 1D
+        self.check_all_bc(x, y, 0)
+        
+        # Check Multi-D 
+        Y = np.stack([y, y + 1], axis=0) 
+        self.check_all_bc(x, Y, 1)
 
     def test_dtypes(self):
         x = np.array([0, 1, 2, 3], dtype=int)
